@@ -6,7 +6,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 const BASE = "https://intervals.icu/api/v1";
 
 export class MyMCP extends McpAgent {
-  server = new McpServer({ name: "Intervals.icu", version: "1.0.0" });
+  server = new McpServer({ name: "Intervals.icu", version: "1.1.0" });
 
   private authHeader() {
     return `Basic ${btoa(`API_KEY:${this.env.INTERVALS_API_KEY}`)}`;
@@ -31,19 +31,57 @@ export class MyMCP extends McpAgent {
     const athlete = this.env.INTERVALS_ATHLETE_ID;
 
     this.server.tool(
-      "getRecentActivities",
-      { days: z.number().optional().describe("Days back, default 14") },
-      async ({ days = 14 }) => {
-        const oldest = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-        const data = await this.icu(`/athlete/${athlete}/activities?oldest=${oldest}`);
+      "getActivities",
+      {
+        days: z.number().optional().describe("Days back if oldest is not provided, default 30"),
+        oldest: z.string().optional().describe("Start date YYYY-MM-DD (overrides days)"),
+        newest: z.string().optional().describe("End date YYYY-MM-DD (defaults to today)"),
+      },
+      async ({ days = 30, oldest, newest }) => {
+        const start = oldest ?? new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+        const query = newest ? `oldest=${start}&newest=${newest}` : `oldest=${start}`;
+        const data = await this.icu(`/athlete/${athlete}/activities?${query}`);
+        return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      },
+    );
+
+    this.server.tool(
+      "getActivityDetails",
+      {
+        activityId: z.string().describe("Activity ID (e.g. 'i12345678') from getActivities"),
+        includeIntervals: z.boolean().optional().describe("Include laps and detected intervals, default true"),
+      },
+      async ({ activityId, includeIntervals = true }) => {
+        const data = await this.icu(`/activity/${activityId}?intervals=${includeIntervals}`);
+        return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      },
+    );
+
+    this.server.tool(
+      "getPowerCurve",
+      {
+        curves: z.string().optional().describe("Curve period: e.g. '42d', '90d', '1y', 'all', or season name. Default '42d'"),
+        type: z.string().optional().describe("Sport type, default 'Ride'"),
+      },
+      async ({ curves = "42d", type = "Ride" }) => {
+        const data = await this.icu(`/athlete/${athlete}/power-curves.json?curves=${encodeURIComponent(curves)}&type=${encodeURIComponent(type)}`);
+        return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      },
+    );
+
+    this.server.tool(
+      "getAthleteProfile",
+      {},
+      async () => {
+        const data = await this.icu(`/athlete/${athlete}`);
         return { content: [{ type: "text", text: JSON.stringify(data) }] };
       },
     );
 
     this.server.tool(
       "getWellness",
-      { days: z.number().optional().describe("Days back, default 7") },
-      async ({ days = 7 }) => {
+      { days: z.number().optional().describe("Days back, default 14") },
+      async ({ days = 14 }) => {
         const oldest = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
         const data = await this.icu(`/athlete/${athlete}/wellness?oldest=${oldest}`);
         return { content: [{ type: "text", text: JSON.stringify(data) }] };
