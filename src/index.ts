@@ -6,7 +6,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 const BASE = "https://intervals.icu/api/v1";
 
 export class MyMCP extends McpAgent {
-  server = new McpServer({ name: "Intervals.icu", version: "1.1.0" });
+  server = new McpServer({ name: "Intervals.icu", version: "1.2.0" });
 
   private authHeader() {
     return `Basic ${btoa(`API_KEY:${this.env.INTERVALS_API_KEY}`)}`;
@@ -58,13 +58,64 @@ export class MyMCP extends McpAgent {
     );
 
     this.server.tool(
+      "getActivityStreams",
+      {
+        activityId: z.string().describe("Activity ID (e.g. 'i12345678')"),
+        types: z.string().optional().describe("Comma-separated streams: watts,heartrate,cadence,altitude,velocity_smooth,distance,time,w_bal. Default 'watts,heartrate,cadence,altitude,distance'"),
+        startSec: z.number().optional().describe("Start second of slice (e.g. 3600 for 1h into ride). Omit for full ride."),
+        endSec: z.number().optional().describe("End second of slice (e.g. 4500). Omit for full ride."),
+        sampleRate: z.number().optional().describe("Keep 1 point every N seconds (default 1 if slice <= 1800s, else 5 to avoid token overflow)"),
+      },
+      async ({
+        activityId,
+        types = "watts,heartrate,cadence,altitude,distance",
+        startSec,
+        endSec,
+        sampleRate,
+      }) => {
+        const streamTypes = types.split(",").map((t) => t.trim()).filter(Boolean);
+        const query = streamTypes.map((t) => `types=${encodeURIComponent(t)}`).join("&");
+        const rawStreams: Array<{ type: string; data: number[] }> = await this.icu(
+          `/activity/${activityId}/streams.json?${query}`,
+        );
+
+        const totalLen = rawStreams[0]?.data?.length ?? 0;
+        const from = Math.max(0, startSec ?? 0);
+        const to = Math.min(totalLen, endSec ?? totalLen);
+        const sliceLen = Math.max(0, to - from);
+        const step = Math.max(1, sampleRate ?? (sliceLen <= 1800 ? 1 : 5));
+
+        const result: Record<string, unknown> = {
+          activityId,
+          totalDurationSec: totalLen,
+          returnedRangeSec: [from, to],
+          sampleRateSec: step,
+          streams: {} as Record<string, number[]>,
+        };
+
+        for (const s of rawStreams) {
+          const sampled: number[] = [];
+          for (let i = from; i < to; i += step) {
+            sampled.push(s.data[i]);
+          }
+          (result.streams as Record<string, number[]>)[s.type] = sampled;
+        }
+
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      },
+    );
+
+    this.server.tool(
       "getPowerCurve",
       {
-        curves: z.string().optional().describe("Curve period: e.g. '42d', '90d', '1y', 'all', or season name. Default '42d'"),
+        curves: z.string().optional().describe("Curve period: e.g. '42d', '90d', '1y', 'all', or season name. Default '90d'"),
         type: z.string().optional().describe("Sport type, default 'Ride'"),
+        fatigue: z.string().optional().describe("Optional fatigue filter: e.g. '1000kJ', '2000kJ', '15kJ/kg', '30kJ/kg'. Omit for fresh curve."),
       },
-      async ({ curves = "42d", type = "Ride" }) => {
-        const data = await this.icu(`/athlete/${athlete}/power-curves.json?curves=${encodeURIComponent(curves)}&type=${encodeURIComponent(type)}`);
+      async ({ curves = "90d", type = "Ride", fatigue }) => {
+        let url = `/athlete/${athlete}/power-curves.json?curves=${encodeURIComponent(curves)}&type=${encodeURIComponent(type)}`;
+        if (fatigue) url += `&fatigue=${encodeURIComponent(fatigue)}`;
+        const data = await this.icu(url);
         return { content: [{ type: "text", text: JSON.stringify(data) }] };
       },
     );
